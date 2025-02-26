@@ -4,9 +4,14 @@ from requests.packages import urllib3
 
 urllib3.disable_warnings()
 
+proxies = {
+    'http': 'http://127.0.0.1:8080',
+    'https': 'http://127.0.0.1:8080',
+}
+
 def login(id, passwd):
     
-    def get_execution():
+    def get_execution_and_insert_cookie():
         cookies = {
             '_7da9a': 'http://10.0.3.60:8080',
         }
@@ -33,15 +38,17 @@ def login(id, passwd):
             'service': 'https://byxt.buaa.edu.cn/jwapp/sys/homeapp/index.do',
         }
 
-        response = requests.get('https://sso.buaa.edu.cn/login', params=params, cookies=cookies, headers=headers, verify=False, allow_redirects=False)
+        response = requests.get('https://sso.buaa.edu.cn/login', params=params, cookies=cookies, headers=headers, verify=False, allow_redirects=False, proxies=proxies)
         soup = BeautifulSoup(response.text, 'html.parser')
         execution = soup.find('input', {'name': 'execution'}).get('value')
         # print(execution)
-        return execution
+        insert_cookie = response.headers.get('Set-Cookie').split(';')[2].split('=')[-1]
+        return execution, insert_cookie
     
-    def get_location(id, passwd, execution):
+    def get_location(id, passwd, execution, insert_cookie):
         cookies = {
             '_7da9a': 'http://10.0.3.60:8080',
+            'insert_cookie': insert_cookie,
         }
 
         headers = {
@@ -74,7 +81,7 @@ def login(id, passwd):
             '_eventId': 'submit',
         }
 
-        response = requests.post('https://sso.buaa.edu.cn/login', cookies=cookies, headers=headers, data=data, verify=False, allow_redirects=False)
+        response = requests.post('https://sso.buaa.edu.cn/login', cookies=cookies, headers=headers, data=data, verify=False, allow_redirects=False, proxies=proxies)
         # print(response.headers)
         # CASTGC = response.headers.get('Set-Cookie').split(';')[0].split('=')[-1]
         location = response.headers.get("Location").strip().split("=")[-1]
@@ -106,15 +113,19 @@ def login(id, passwd):
             "ticket": location,
         }
 
-        response = requests.get('https://byxt.buaa.edu.cn/jwapp/sys/homeapp/index.do', params=params, headers=headers, verify=False, allow_redirects=False)
+        response = requests.get('https://byxt.buaa.edu.cn/jwapp/sys/homeapp/index.do', params=params, headers=headers, verify=False, allow_redirects=False, proxies=proxies)
 
-        # print(response.headers)
-        gs_sessionid = response.headers.get("Set-Cookie").strip().split(";")[0].split("=")[-1]
-        return gs_sessionid
+        set_cookie = response.headers.get("Set-Cookie").strip().split(";")
+        gs_sessionid = set_cookie[6].split("=")[-1]
+        _zte_cid_ = set_cookie[0].split("=")[-1]
+        _zte_sid_ = set_cookie[3].split("=")[-1]
+        return gs_sessionid, _zte_cid_, _zte_sid_
     
-    def get_WEU(gs_sessionid):
+    def get_WEU(gs_sessionid, _zte_cid_, _zte_sid_):
         cookies = {
             'GS_SESSIONID': gs_sessionid,
+            '_zte_cid_': _zte_cid_,
+            '_zte_sid_': _zte_sid_,
         }
 
         headers = {
@@ -136,14 +147,14 @@ def login(id, passwd):
             'Connection': 'keep-alive',
         }
 
-        response = requests.get('https://byxt.buaa.edu.cn/jwapp/sys/homeapp/index.do', cookies=cookies, headers=headers, verify=False, allow_redirects=False)
+        response = requests.get('https://byxt.buaa.edu.cn/jwapp/sys/homeapp/index.do', cookies=cookies, headers=headers, verify=False, allow_redirects=False, proxies=proxies)
         _WEU = response.headers.get("Set-Cookie").strip().split(",")[-1].split(";")[0].split("=")[-1]
         return _WEU
 
-    execution = get_execution()
-    location = get_location(id, passwd, execution)
-    gs_sessionid = get_gs_sessionid(location)
-    _WEU = get_WEU(gs_sessionid)
+    execution, insert_cookie = get_execution_and_insert_cookie()
+    location = get_location(id, passwd, execution, insert_cookie)
+    gs_sessionid, _zte_cid_, _zte_sid_ = get_gs_sessionid(location)
+    _WEU = get_WEU(gs_sessionid, _zte_cid_, _zte_sid_)
     return gs_sessionid, _WEU
 
 def get_schedule(gs_sessionid, _WEU, term):
@@ -185,7 +196,7 @@ def get_schedule(gs_sessionid, _WEU, term):
         data=data,
         verify=False,
     )
-    
+    # print(response.text)
     schedule_json = response.json()
     schedule_list = schedule_json["datas"]["arrangedList"]
     return schedule_list
@@ -330,9 +341,14 @@ def convert_schedule_to_icaleander(list_for_csv):
         f.write("END:VCALENDAR\n")
 
 if __name__ == "__main__":
+    print("使用前提示，请确保已经在校园网环境下并且代理配置正确，若在下方登录中出现登录失败请查看README中的【登录失败】标题下内容！")
     id = input("请输入统一认证学号：").strip()
     passwd = input("请输入统一认证密码：").strip()
     gs_session, _WEU = login(id, passwd)
+    # print(_WEU)
+    if '01 Jan 1970 00:00:10 GMT' in _WEU:
+        print("登陆失败，请检查代理配置！")
+        exit()
     print("账号{}登陆成功！".format(id))
     year = input("请输入学年，如“2024-2025-1”代表2024-2025学年第一学期：").strip()
     schedule_list = get_schedule(gs_session, _WEU, year)
