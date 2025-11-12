@@ -15,22 +15,22 @@ class login:
     SSO_LOGIN = 'https://sso.buaa.edu.cn/login'
     JWAPP = 'https://byxt.buaa.edu.cn/jwapp/sys/homeapp/index.do'
     SHCEDULE_URL = 'https://byxt.buaa.edu.cn/jwapp/sys/homeapp/api/home/student/getMyScheduleDetail.do'
-    
+
     def __init__(self, username: str = '', password: str = '', term: str = ''):
         self.session = requests.session()
         self.username = username
         self.password = password
         self.term = term
         self.execution = None
-        
+
         if not self.username or not self.password:
             logging.error("Username or password is empty.")
             return False
-        
+
         if not self.term:
             logging.error("Term is empty.")
             return False
-            
+
         if logging.getLogger().level == logging.DEBUG:
             self.session.proxies = {
                 "http": "http://127.0.0.1:8080",
@@ -39,10 +39,10 @@ class login:
             from requests.packages import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             self.session.verify = False
-        
+
     def get_execution(self):
         logging.info("Fetching execution value...")
-        response = self.session.get(self.SSO_LOGIN, 
+        response = self.session.get(self.SSO_LOGIN,
             params={'service':self.JWAPP})
         soup = BeautifulSoup(response.text, 'html.parser')
         execution_input = soup.find('input', {'name': 'execution'})
@@ -51,12 +51,12 @@ class login:
         else:
             logging.error("Failed to find execution input field.")
             return False
-            
+
         logging.info("Finished fetching execution value.")
         return True
-        
+
     def login(self):
-            
+
         logging.info("Starting login process...")
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
@@ -80,25 +80,25 @@ class login:
             logging.error("Login failed, please try again.")
             logging.debug(f"Response status code: {response.status_code =}, Response text: {response.text}")
             return False
-        
+
         logging.info("Login successful.")
         relocation_url = response.headers.get('Location', '')
         if not relocation_url:
             logging.error("No relocation URL found after login.")
             return False
-        
+
         logging.info(f"Redirecting to {relocation_url}")
         response = self.session.get(relocation_url, allow_redirects=True)
-        
+
         final_url = response.url
         logging.info(f"Final URL after redirection: {final_url}")
         if final_url == self.JWAPP:
             logging.info("Successfully logged into the academic system.")
             return True
-        
+
         logging.error("Failed to log into the academic system.")
         return False
-    
+
     def get_schedule(self):
         logging.info("Fetching schedule...")
         response = self.session.post(
@@ -109,7 +109,7 @@ class login:
                 'type': 'term',
             }
         )
-        
+
         try:
             return_json = response.json()
             logging.info("Schedule fetched successfully.")
@@ -117,97 +117,125 @@ class login:
         except:
             logging.error("Failed to parse schedule response as JSON.")
             return None
-            
+
     def run(self):
         if not self.get_execution():
             return False
-        
+
         if not self.login():
             return False
-            
+
         schedule = self.get_schedule()
         if schedule is None:
             return False
-            
+
         data = schedule.get('datas', [])
         if not data:
             logging.error("No schedule data found.")
             return False
-        
+
         arranged_list = data.get('arrangedList', [])
         if not arranged_list:
             logging.error("No arranged list found in schedule data.")
             return False
-            
+
         return arranged_list
-        
+
 class convert:
     def __init__(self, schedule_list=[]):
         self.first_day = datetime.today()
+        # 上课时间表，单位为北京时间 (UTC+8)
         self.daily_time = {
-            1: ["000000", "004500"],
-            2: ["005000", "013500"],
-            3: ["015000", "023500"],
-            4: ["024000", "032500"],
-            5: ["033000", "041500"],
-            6: ["060000", "064500"],
-            7: ["065000", "073500"],
-            8: ["075000", "083500"],
-            9: ["084000", "092500"],
-            10: ["093000", "101500"],
-            11: ["110000", "114500"],
-            12: ["115000", "123500"],
-            13: ["124000", "132500"],
-            14: ["133000", "141500"],
-        }        
-        self.schedule_list = schedule_list
-        self.list_for_csv = []
-        
-    def convert_schedule_to_csv(self):
-        with open("schedule.csv", "w") as f:
-            writer = csv.writer(f)
-            writer.writerow(["课程名称", "星期", "开始节数", "结束节数", "老师", "地点", "周数"])
-        
-    
-        for each_class in self.schedule_list:
-            class_name = each_class["courseName"]
-            class_day = each_class["dayOfWeek"]
-            beginSection = each_class["beginSection"]
-            endSection = each_class["endSection"]
-            place = each_class["placeName"]
-            weeks_and_teachers = each_class["cellDetail"][1]["text"].split(" ")
+            1: ["08:00", "08:45"], 2: ["08:50", "09:35"],
+            3: ["09:50", "10:35"], 4: ["10:40", "11:25"],
+            5: ["11:30", "12:15"], 6: ["14:00", "14:45"],
+            7: ["14:50", "15:35"], 8: ["15:50", "16:35"],
+            9: ["16:40", "17:25"], 10: ["17:30", "18:15"],
+            11: ["19:00", "19:45"], 12: ["19:50", "20:35"],
+            13: ["20:40", "21:25"], 14: ["21:30", "22:15"],
+        }
+        self.raw_schedule_list = schedule_list
+        self.parsed_schedule = []
+
+    def parse_schedule(self):
+        """
+        解析从API获取的原始课程数据，转换为结构化的字典列表。
+        这是核心处理步骤，为生成CSV和ICS文件做准备。
+        """
+        for each_class in self.raw_schedule_list:
+            class_name = each_class.get("courseName", "N/A")
+            class_day = each_class.get("dayOfWeek")
+            beginSection = each_class.get("beginSection")
+            endSection = each_class.get("endSection")
+            place = each_class.get("placeName", "地点待定")
+            credit = each_class.get("credit", "N/A")
+            course_code = each_class.get("courseCode", "N/A")
+
+            teacher_week_string = ""
+            for detail in each_class.get("cellDetail", []):
+                text = detail.get("text", "")
+                if text and "[" in text and "]" in text:
+                    teacher_week_string = text
+                    break
+
+            if not teacher_week_string:
+                logging.warning(f"未能找到课程 '{class_name}' 的教师/周数信息，已跳过。")
+                continue
+
+            weeks_and_teachers = teacher_week_string.split(" ")
             for i in weeks_and_teachers:
-                append_list = []
                 find = re.findall(r"(.*?)\[(.*?)\]", i)
-                teacher = find[0][0]
-                weeks = find[0][1].split(",")
+                if not find:
+                    logging.warning(f"无法解析教师周数信息: '{i}'，课程: '{class_name}'，已跳过此条目。")
+                    continue
+
+                teacher = find[0][0] or "教师待定"
+                weeks_raw = find[0][1]
+
+                weeks = weeks_raw.split(",")
                 week_list = []
                 for week in weeks:
-                    if re.findall(r"单", week):
-                        week = week[:-4]
-                        week += "单"
-                    elif re.findall(r"双", week):
-                        week = week[:-4]
-                        week += "双"
-                    else:
-                        week = week[:-1]
-                    week_list.append(week)
-                    week_all = "、".join(week_list)
-                append_list.append(class_name)
-                append_list.append(class_day)
-                append_list.append(beginSection)
-                append_list.append(endSection)
-                append_list.append(teacher)
-                append_list.append(place)
-                append_list.append(week_all)
-                self.list_for_csv.append(append_list)
-        
-        with open("schedule.csv", "a") as f:
-            writer = csv.writer(f)
-            writer.writerows(self.list_for_csv)
-    
+                    # --- 修改开始：更稳健的周数清理逻辑 ---
+                    # 替换所有干扰字符，生成干净的格式，如 '1-5单', '6-13', '7'
+                    processed_week = week.replace("周", "").replace("(", "").replace(")", "")
+                    # --- 修改结束 ---
+                    week_list.append(processed_week)
+
+                week_all = "、".join(week_list)
+
+                parsed_class = {
+                    "name": class_name,
+                    "credit": credit,
+                    "course_code": course_code,
+                    "day": class_day,
+                    "start_section": beginSection,
+                    "end_section": endSection,
+                    "teacher": teacher,
+                    "place": place,
+                    "weeks_str": week_all,
+                }
+                self.parsed_schedule.append(parsed_class)
         return True
-    
+
+    def write_to_csv(self, filename="schedule.csv"):
+        """将解析后的课程数据写入CSV文件。"""
+        logging.info(f"Writing schedule to {filename}...")
+
+        headers = ["课程名称", "学分", "课程号", "星期", "开始节数", "结束节数", "老师", "地点", "周数"]
+
+        with open(filename, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+
+            for item in self.parsed_schedule:
+                writer.writerow([
+                    item["name"], item["credit"], item["course_code"],
+                    item["day"], item["start_section"], item["end_section"],
+                    item["teacher"], item["place"], item["weeks_str"],
+                ])
+        logging.info(f"Successfully wrote to {filename}.")
+        return True
+
     def set_the_first_day_of_term(self, year, month, day):
         input_day = datetime(year, month, day)
         if input_day.weekday() != 0:
@@ -215,78 +243,122 @@ class convert:
             return False
         self.first_day = datetime(year, month, day)
         return True
-    
+
     def set_the_default_first_day_of_term(self):
         today = datetime.today()
         today_weekday = today.weekday()
-        if today_weekday != 0:
-            self.first_day = today - timedelta(days=today_weekday)
-        else:
-            self.first_day = today
+        self.first_day = today - timedelta(days=today_weekday)
         logging.info(f"Set the first day：{self.first_day.strftime('%Y-%m-%d')}")
         return True
-    
-    def convert_schedule_to_icaleander(self):
-        with open("schedule.ics", "w") as f:
+
+    def write_to_ical(self, filename="schedule.ics"):
+        """将解析后的课程数据写入iCalendar (.ics) 文件。"""
+        logging.info(f"Writing iCalendar file to {filename}...")
+
+        beijing_tz = "BEGIN:VTIMEZONE\nTZID:Asia/Shanghai\nX-LIC-LOCATION:Asia/Shanghai\nBEGIN:STANDARD\nTZOFFSETFROM:+0800\nTZOFFSETTO:+0800\nTZNAME:CST\nDTSTART:19700101T000000\nEND:STANDARD\nEND:VTIMEZONE\n"
+
+        with open(filename, "w", encoding="utf-8") as f:
             f.write("BEGIN:VCALENDAR\n")
             f.write("VERSION:2.0\n")
-            f.write("PRODID:-//hacksw/handcal//NONSGML v1.0//EN\n")
+            f.write("PRODID:-//buaa2ical by CoolwindHF & Gemini//NONSGML v1.0//EN\n")
             f.write("CALSCALE:GREGORIAN\n")
-            for each_class in self.list_for_csv:
-                name = each_class[0]
-                day = each_class[1]
-                start_section = each_class[2]
-                end_section = each_class[3]
-                teacher = each_class[4]
-                place = each_class[5]
-                weeks = each_class[6].split("、")
-                for week in weeks:
+            f.write(beijing_tz)
+
+            for each_class in self.parsed_schedule:
+                name = each_class["name"]
+                day = each_class["day"]
+                start_section = each_class["start_section"]
+                end_section = each_class["end_section"]
+                teacher = each_class["teacher"]
+                place = each_class["place"]
+                credit = each_class["credit"]
+                course_code = each_class["course_code"]
+
+                start_time_str = self.daily_time.get(int(start_section), ["00:00"])[0]
+                end_time_str = self.daily_time.get(int(end_section), ["00:00"])[1]
+
+                weeks = each_class["weeks_str"].split("、")
+                for week_range in weeks:
+                    week_parts = week_range.split("-")
+                    interval = 1
+                    is_odd_even = None
+
+                    if len(week_parts) == 1:
+                        if "单" in week_parts[0]:
+                            start_week = int(week_parts[0][:-1])
+                            end_week = start_week
+                            is_odd_even = '单'
+                        elif "双" in week_parts[0]:
+                            start_week = int(week_parts[0][:-1])
+                            end_week = start_week
+                            is_odd_even = '双'
+                        else:
+                            start_week = int(week_parts[0])
+                            end_week = start_week
+                    else:
+                        start_week = int(week_parts[0])
+                        if "单" in week_parts[1]:
+                            end_week = int(week_parts[1][:-1])
+                            is_odd_even = '单'
+                        elif "双" in week_parts[1]:
+                            end_week = int(week_parts[1][:-1])
+                            is_odd_even = '双'
+                        else:
+                            end_week = int(week_parts[1])
+
+                    first_class_date = self.first_day + timedelta(days=(int(day) - 1) + (start_week - 1) * 7)
+                    if is_odd_even == '单' and start_week % 2 == 0:
+                        first_class_date += timedelta(weeks=1)
+                    elif is_odd_even == '双' and start_week % 2 != 0:
+                        first_class_date += timedelta(weeks=1)
+
+                    if is_odd_even:
+                        interval = 2
+
+                    dtstart_str = f"{first_class_date.strftime('%Y%m%d')}T{start_time_str.replace(':', '')}00"
+                    dtend_str = f"{first_class_date.strftime('%Y%m%d')}T{end_time_str.replace(':', '')}00"
+
+                    # --- 核心修正 ---
+                    # 正确计算最后一节课的日期
+                    last_class_date = self.first_day + timedelta(days=(int(day) - 1) + (end_week - 1) * 7)
+                    # 将 UNTIL 日期设置为最后一节课当天的结束时间，确保包含最后一节课
+                    until_str = last_class_date.strftime("%Y%m%d") + "T235959Z"
+                    # --- 修正结束 ---
+
                     f.write("BEGIN:VEVENT\n")
-                    f.write("UID:buaa2ical-{}-CoolwindHF\n".format(str(uuid.uuid4())))
-                    week = week.split("-")
-                    every_2_weeks = False
-                    if len(week) == 1:
-                        start_week = int(week[0])
-                        end_week = int(week[0])
-                    else:
-                        if re.findall(r"单|双", week[1]):
-                            every_2_weeks = True
-                            start_week = int(week[0])
-                            end_week = int(week[1][:-1])
-                        else:
-                            start_week = int(week[0])
-                            end_week = int(week[1])
-                    start_day = (self.first_day + timedelta(days=(int(day) - 1) + (int(start_week) - 1) * 7)).strftime("%Y%m%d")
-                    end_day = (self.first_day + timedelta(days=(int(day) - 1) + (int(end_week) - 1) * 7)).strftime("%Y%m%d")
-                    DTSTART = start_day + "T" + self.daily_time[int(start_section)][0] + "Z"
-                    DTEND = start_day + "T" + self.daily_time[int(end_section)][1] + "Z"
-                    f.write("DTSTART:{}\n".format(DTSTART))
-                    f.write("DTEND:{}\n".format(DTEND))
-                    if len(week) == 1:
-                        description = f"第{start_week}周\\n第{start_section} - {end_section}节\\n{place}\\n{teacher}\\n"
-                    else:
-                        if not every_2_weeks:
-                            description = f"第{start_week} - {end_week}周\\n第{start_section} - {end_section}节\\n{place}\\n{teacher}\\n"
-                        else:
-                            description = f"第{start_week} - {end_week}{week[1][-1:]}周\\n第{start_section} - {end_section}节\\n{place}\\n{teacher}\\n"
+                    f.write(f"UID:{uuid.uuid4()}@buaa.edu.cn\n")
+                    from datetime import timezone
+                    f.write(f"DTSTAMP:{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}\n")
+                    f.write(f"DTSTART;TZID=Asia/Shanghai:{dtstart_str}\n")
+                    f.write(f"DTEND;TZID=Asia/Shanghai:{dtend_str}\n")
+
+                    description = (
+                        f"教师: {teacher}\\n"
+                        f"周数: {week_range}周\\n"
+                        f"节数: {start_section}-{end_section}节\\n"
+                        f"学分: {credit}\\n"
+                        f"课程号: {course_code}"
+                    )
                     f.write(f"DESCRIPTION:{description}\n")
+                    f.write(f"LOCATION:{place}\n")
                     f.write(f"SUMMARY:{name}\n")
-                    f.write(f"LOCATION:{place} {teacher}\n")
-                    if not every_2_weeks:
-                        f.write(f"RRULE:FREQ=WEEKLY;INTERVAL=1;UNTIL={end_day}\n")
-                    else:
-                        f.write(f"RRULE:FREQ=WEEKLY;INTERVAL=2;UNTIL={end_day}\n")
+
+                    if start_week != end_week or is_odd_even:
+                        f.write(f"RRULE:FREQ=WEEKLY;INTERVAL={interval};UNTIL={until_str}\n")
+
                     f.write("END:VEVENT\n")
             f.write("END:VCALENDAR\n")
-    
+        logging.info(f"Successfully wrote to {filename}.")
+
+
 if __name__ == "__main__":
     if not os.path.exists("config.yaml"):
         logging.error("File `config.yaml` isn't exist, please create one.")
         exit(1)
-        
-    with open("config.yaml", "r") as f:
+
+    with open("config.yaml", "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
-        
+
     username = config.get("username", "")
     password = config.get("password", "")
     term = config.get("term", "")
@@ -295,20 +367,24 @@ if __name__ == "__main__":
         year, month, day = first_day_input.year, first_day_input.month, first_day_input.day
     else:
         year = month = day = None
-        
+
     obj = login(username, password, term)
     schedule = obj.run()
     if not schedule:
         logging.error("Failed to retrieve schedule.")
         exit(1)
-        
+
     conv = convert(schedule_list=schedule)
     if year and month and day:
         if not conv.set_the_first_day_of_term(year, month, day):
             exit(1)
     else:
         conv.set_the_default_first_day_of_term()
-        
-    conv.convert_schedule_to_csv()
-    conv.convert_schedule_to_icaleander()
-    
+
+    # 按顺序执行：解析 -> 写CSV -> 写ICS
+    conv.parse_schedule()
+    conv.write_to_csv()
+    conv.write_to_ical()
+    print("任务完成！已生成 schedule.csv 和 schedule.ics 文件。")
+
+
